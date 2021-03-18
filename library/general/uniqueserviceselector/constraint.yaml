@@ -4,3 +4,5 @@ metadata:
   name: unique-service-selector
   labels:
     owner: admin.agilebank.demo
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
