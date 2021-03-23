@@ -1,0 +1,1067 @@
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sAllowedRepos
+metadata:
+  name: repo-is-openpolicyagent
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  match:
+    kinds:
+    - apiGroups: [""]
+      kinds: ["Pod"]
+    namespaces:
+    - "default"
+  parameters:
+    repos:
+    - "openpolicyagent"
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8sallowedrepos
+  annotations:
+    description: Requires container images to begin with a repo string from a specified
+      list.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sAllowedRepos
+      validation:
+        # Schema for the `parameters` field
+        openAPIV3Schema:
+          properties:
+            repos:
+              type: array
+              items:
+                type: string
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8sallowedrepos
+
+      violation[{"msg": msg}] {
+        container := input.review.object.spec.containers[_]
+        satisfied := [good | repo = input.parameters.repos[_] ; good = startswith(container.image, repo)]
+        not any(satisfied)
+        msg := sprintf("container <%v> has an invalid image repo <%v>, allowed repos are %v", [container.name, container.image, input.parameters.repos])
+      }
+
+      violation[{"msg": msg}] {
+        container := input.review.object.spec.initContainers[_]
+        satisfied := [good | repo = input.parameters.repos[_] ; good = startswith(container.image, repo)]
+        not any(satisfied)
+        msg := sprintf("container <%v> has an invalid image repo <%v>, allowed repos are %v", [container.name, container.image, input.parameters.repos])
+      }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sBlockNodePort
+metadata:
+  name: block-node-port
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  match:
+    kinds:
+    - apiGroups: [""]
+      kinds: ["Service"]
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8sblocknodeport
+  annotations:
+    description: Disallows all Services with type NodePort.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sBlockNodePort
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8sblocknodeport
+
+      violation[{"msg": msg}] {
+        input.review.kind.kind == "Service"
+        input.review.object.spec.type == "NodePort"
+        msg := "User is not allowed to create service of type NodePort"
+      }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sContainerLimits
+metadata:
+  name: container-must-have-limits
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  match:
+    kinds:
+    - apiGroups: [""]
+      kinds: ["Pod"]
+  parameters:
+    cpu: "200m"
+    memory: "1Gi"
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8scontainerlimits
+  annotations:
+    description: Requires containers to have memory and CPU limits set and within
+      a specified maximum amount.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sContainerLimits
+      validation:
+        # Schema for the `parameters` field
+        openAPIV3Schema:
+          properties:
+            cpu:
+              type: string
+            memory:
+              type: string
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8scontainerlimits
+
+      missing(obj, field) = true {
+        not obj[field]
+      }
+
+      missing(obj, field) = true {
+        obj[field] == ""
+      }
+
+      canonify_cpu(orig) = new {
+        is_number(orig)
+        new := orig * 1000
+      }
+
+      canonify_cpu(orig) = new {
+        not is_number(orig)
+        endswith(orig, "m")
+        new := to_number(replace(orig, "m", ""))
+      }
+
+      canonify_cpu(orig) = new {
+        not is_number(orig)
+        not endswith(orig, "m")
+        re_match("^[0-9]+$", orig)
+        new := to_number(orig) * 1000
+      }
+
+      # 10 ** 21
+      mem_multiple("E") = 1000000000000000000000 { true }
+
+      # 10 ** 18
+      mem_multiple("P") = 1000000000000000000 { true }
+
+      # 10 ** 15
+      mem_multiple("T") = 1000000000000000 { true }
+
+      # 10 ** 12
+      mem_multiple("G") = 1000000000000 { true }
+
+      # 10 ** 9
+      mem_multiple("M") = 1000000000 { true }
+
+      # 10 ** 6
+      mem_multiple("k") = 1000000 { true }
+
+      # 10 ** 3
+      mem_multiple("") = 1000 { true }
+
+      # Kubernetes accepts millibyte precision when it probably shouldn't.
+      # https://github.com/kubernetes/kubernetes/issues/28741
+      # 10 ** 0
+      mem_multiple("m") = 1 { true }
+
+      # 1000 * 2 ** 10
+      mem_multiple("Ki") = 1024000 { true }
+
+      # 1000 * 2 ** 20
+      mem_multiple("Mi") = 1048576000 { true }
+
+      # 1000 * 2 ** 30
+      mem_multiple("Gi") = 1073741824000 { true }
+
+      # 1000 * 2 ** 40
+      mem_multiple("Ti") = 1099511627776000 { true }
+
+      # 1000 * 2 ** 50
+      mem_multiple("Pi") = 1125899906842624000 { true }
+
+      # 1000 * 2 ** 60
+      mem_multiple("Ei") = 1152921504606846976000 { true }
+
+      get_suffix(mem) = suffix {
+        not is_string(mem)
+        suffix := ""
+      }
+
+      get_suffix(mem) = suffix {
+        is_string(mem)
+        count(mem) > 0
+        suffix := substring(mem, count(mem) - 1, -1)
+        mem_multiple(suffix)
+      }
+
+      get_suffix(mem) = suffix {
+        is_string(mem)
+        count(mem) > 1
+        suffix := substring(mem, count(mem) - 2, -1)
+        mem_multiple(suffix)
+      }
+
+      get_suffix(mem) = suffix {
+        is_string(mem)
+        count(mem) > 1
+        not mem_multiple(substring(mem, count(mem) - 1, -1))
+        not mem_multiple(substring(mem, count(mem) - 2, -1))
+        suffix := ""
+      }
+
+      get_suffix(mem) = suffix {
+        is_string(mem)
+        count(mem) == 1
+        not mem_multiple(substring(mem, count(mem) - 1, -1))
+        suffix := ""
+      }
+
+      get_suffix(mem) = suffix {
+        is_string(mem)
+        count(mem) == 0
+        suffix := ""
+      }
+
+      canonify_mem(orig) = new {
+        is_number(orig)
+        new := orig * 1000
+      }
+
+      canonify_mem(orig) = new {
+        not is_number(orig)
+        suffix := get_suffix(orig)
+        raw := replace(orig, suffix, "")
+        re_match("^[0-9]+$", raw)
+        new := to_number(raw) * mem_multiple(suffix)
+      }
+
+      violation[{"msg": msg}] {
+        general_violation[{"msg": msg, "field": "containers"}]
+      }
+
+      violation[{"msg": msg}] {
+        general_violation[{"msg": msg, "field": "initContainers"}]
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        cpu_orig := container.resources.limits.cpu
+        not canonify_cpu(cpu_orig)
+        msg := sprintf("container <%v> cpu limit <%v> could not be parsed", [container.name, cpu_orig])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        mem_orig := container.resources.limits.memory
+        not canonify_mem(mem_orig)
+        msg := sprintf("container <%v> memory limit <%v> could not be parsed", [container.name, mem_orig])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        not container.resources
+        msg := sprintf("container <%v> has no resource limits", [container.name])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        not container.resources.limits
+        msg := sprintf("container <%v> has no resource limits", [container.name])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        missing(container.resources.limits, "cpu")
+        msg := sprintf("container <%v> has no cpu limit", [container.name])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        missing(container.resources.limits, "memory")
+        msg := sprintf("container <%v> has no memory limit", [container.name])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        cpu_orig := container.resources.limits.cpu
+        cpu := canonify_cpu(cpu_orig)
+        max_cpu_orig := input.parameters.cpu
+        max_cpu := canonify_cpu(max_cpu_orig)
+        cpu > max_cpu
+        msg := sprintf("container <%v> cpu limit <%v> is higher than the maximum allowed of <%v>", [container.name, cpu_orig, max_cpu_orig])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        mem_orig := container.resources.limits.memory
+        mem := canonify_mem(mem_orig)
+        max_mem_orig := input.parameters.memory
+        max_mem := canonify_mem(max_mem_orig)
+        mem > max_mem
+        msg := sprintf("container <%v> memory limit <%v> is higher than the maximum allowed of <%v>", [container.name, mem_orig, max_mem_orig])
+      }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sContainerRatios
+metadata:
+  name: container-must-meet-ratio
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  match:
+    kinds:
+    - apiGroups: [""]
+      kinds: ["Pod"]
+  parameters:
+    ratio: "2"
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8scontainerratios
+  annotations:
+    description: Sets a maximum ratio for container resource limits to requests.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sContainerRatios
+      validation:
+        openAPIV3Schema:
+          properties:
+            ratio:
+              type: string
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8scontainerratios
+
+      missing(obj, field) = true {
+        not obj[field]
+      }
+
+      missing(obj, field) = true {
+        obj[field] == ""
+      }
+
+      canonify_cpu(orig) = new {
+        is_number(orig)
+        new := orig * 1000
+      }
+
+      canonify_cpu(orig) = new {
+        not is_number(orig)
+        endswith(orig, "m")
+        new := to_number(replace(orig, "m", ""))
+      }
+
+      canonify_cpu(orig) = new {
+        not is_number(orig)
+        not endswith(orig, "m")
+        re_match("^[0-9]+$", orig)
+        new := to_number(orig) * 1000
+      }
+
+      canonify_cpu(orig) = new {
+        not is_number(orig)
+        not endswith(orig, "m")
+        re_match("^[0-9]+[.][0-9]+$", orig)
+        new := to_number(orig) * 1000
+      }
+
+      # 10 ** 21
+      mem_multiple("E") = 1000000000000000000000 { true }
+
+      # 10 ** 18
+      mem_multiple("P") = 1000000000000000000 { true }
+
+      # 10 ** 15
+      mem_multiple("T") = 1000000000000000 { true }
+
+      # 10 ** 12
+      mem_multiple("G") = 1000000000000 { true }
+
+      # 10 ** 9
+      mem_multiple("M") = 1000000000 { true }
+
+      # 10 ** 6
+      mem_multiple("k") = 1000000 { true }
+
+      # 10 ** 3
+      mem_multiple("") = 1000 { true }
+
+      # Kubernetes accepts millibyte precision when it probably shouldn't.
+      # https://github.com/kubernetes/kubernetes/issues/28741
+      # 10 ** 0
+      mem_multiple("m") = 1 { true }
+
+      # 1000 * 2 ** 10
+      mem_multiple("Ki") = 1024000 { true }
+
+      # 1000 * 2 ** 20
+      mem_multiple("Mi") = 1048576000 { true }
+
+      # 1000 * 2 ** 30
+      mem_multiple("Gi") = 1073741824000 { true }
+
+      # 1000 * 2 ** 40
+      mem_multiple("Ti") = 1099511627776000 { true }
+
+      # 1000 * 2 ** 50
+      mem_multiple("Pi") = 1125899906842624000 { true }
+
+      # 1000 * 2 ** 60
+      mem_multiple("Ei") = 1152921504606846976000 { true }
+
+      get_suffix(mem) = suffix {
+        not is_string(mem)
+        suffix := ""
+      }
+
+      get_suffix(mem) = suffix {
+        is_string(mem)
+        count(mem) > 0
+        suffix := substring(mem, count(mem) - 1, -1)
+        mem_multiple(suffix)
+      }
+
+      get_suffix(mem) = suffix {
+        is_string(mem)
+        count(mem) > 1
+        suffix := substring(mem, count(mem) - 2, -1)
+        mem_multiple(suffix)
+      }
+
+      get_suffix(mem) = suffix {
+        is_string(mem)
+        count(mem) > 1
+        not mem_multiple(substring(mem, count(mem) - 1, -1))
+        not mem_multiple(substring(mem, count(mem) - 2, -1))
+        suffix := ""
+      }
+
+      get_suffix(mem) = suffix {
+        is_string(mem)
+        count(mem) == 1
+        not mem_multiple(substring(mem, count(mem) - 1, -1))
+        suffix := ""
+      }
+
+      get_suffix(mem) = suffix {
+        is_string(mem)
+        count(mem) == 0
+        suffix := ""
+      }
+
+      canonify_mem(orig) = new {
+        is_number(orig)
+        new := orig * 1000
+      }
+
+      canonify_mem(orig) = new {
+        not is_number(orig)
+        suffix := get_suffix(orig)
+        raw := replace(orig, suffix, "")
+        re_match("^[0-9]+$", raw)
+        new := to_number(raw) * mem_multiple(suffix)
+      }
+
+      violation[{"msg": msg}] {
+        general_violation[{"msg": msg, "field": "containers"}]
+      }
+
+      violation[{"msg": msg}] {
+        general_violation[{"msg": msg, "field": "initContainers"}]
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        cpu_orig := container.resources.limits.cpu
+        not canonify_cpu(cpu_orig)
+        msg := sprintf("container <%v> cpu limit <%v> could not be parsed", [container.name, cpu_orig])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        mem_orig := container.resources.limits.memory
+        not canonify_mem(mem_orig)
+        msg := sprintf("container <%v> memory limit <%v> could not be parsed", [container.name, mem_orig])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        cpu_orig := container.resources.requests.cpu
+        not canonify_cpu(cpu_orig)
+        msg := sprintf("container <%v> cpu request <%v> could not be parsed", [container.name, cpu_orig])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        mem_orig := container.resources.requests.memory
+        not canonify_mem(mem_orig)
+        msg := sprintf("container <%v> memory request <%v> could not be parsed", [container.name, mem_orig])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        not container.resources
+        msg := sprintf("container <%v> has no resource limits", [container.name])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        not container.resources.limits
+        msg := sprintf("container <%v> has no resource limits", [container.name])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        missing(container.resources.limits, "cpu")
+        msg := sprintf("container <%v> has no cpu limit", [container.name])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        missing(container.resources.limits, "memory")
+        msg := sprintf("container <%v> has no memory limit", [container.name])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        not container.resources.requests
+        msg := sprintf("container <%v> has no resource requests", [container.name])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        missing(container.resources.requests, "cpu")
+        msg := sprintf("container <%v> has no cpu request", [container.name])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        missing(container.resources.requests, "memory")
+        msg := sprintf("container <%v> has no memory request", [container.name])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        cpu_limits_orig := container.resources.limits.cpu
+        cpu_limits := canonify_cpu(cpu_limits_orig)
+        cpu_requests_orig := container.resources.requests.cpu
+        cpu_requests := canonify_cpu(cpu_requests_orig)
+        cpu_ratio := input.parameters.ratio
+        to_number(cpu_limits) > to_number(cpu_ratio) * to_number(cpu_requests)
+        msg := sprintf("container <%v> cpu limit <%v> is higher than the maximum allowed ratio of <%v>", [container.name, cpu_limits_orig, cpu_ratio])
+      }
+
+      general_violation[{"msg": msg, "field": field}] {
+        container := input.review.object.spec[field][_]
+        mem_limits_orig := container.resources.limits.memory
+        mem_requests_orig := container.resources.requests.memory
+        mem_limits := canonify_mem(mem_limits_orig)
+        mem_requests := canonify_mem(mem_requests_orig)
+        mem_ratio := input.parameters.ratio
+        to_number(mem_limits) > to_number(mem_ratio) * to_number(mem_requests)
+        msg := sprintf("container <%v> memory limit <%v> is higher than the maximum allowed ratio of <%v>", [container.name, mem_limits_orig, mem_ratio])
+      }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sDisallowedTags
+metadata:
+  name: container-image-must-not-have-latest-tag
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  match:
+    kinds:
+    - apiGroups: [""]
+      kinds: ["Pod"]
+    namespaces:
+    - "default"
+  parameters:
+    tags: ["latest"]
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8sdisallowedtags
+  annotations:
+    description: Requires container images to have an image tag different
+      from the ones in a specified list.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sDisallowedTags
+      validation:
+        # Schema for the `parameters` field
+        openAPIV3Schema:
+          properties:
+            tags:
+              type: array
+              items:
+                type: string
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8sdisallowedtags
+
+      violation[{"msg": msg}] {
+        container := input_containers[_]
+        tags := [forbid | tag = input.parameters.tags[_] ; forbid = endswith(container.image, concat(":", ["", tag]))]
+        any(tags)
+        msg := sprintf("container <%v> uses a disallowed tag <%v>; disallowed tags are %v", [container.name, container.image, input.parameters.tags])
+      }
+
+      violation[{"msg": msg}] {
+        container := input_containers[_]
+        tag := [contains(container.image, ":")]
+        not all(tag)
+        msg := sprintf("container <%v> didn't specify an image tag <%v>", [container.name, container.image])
+      }
+
+      input_containers[c] {
+        c := input.review.object.spec.containers[_]
+      }
+      input_containers[c] {
+        c := input.review.object.spec.initContainers[_]
+      }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sExternalIPs
+metadata:
+  name: external-ips
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  match:
+    kinds:
+    - apiGroups: [""]
+      kinds: ["Service"]
+  parameters:
+    allowedIPs:
+    - "203.0.113.0"
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8sexternalips
+  annotations:
+    description: "Restricts Services from containing externalIPs except those in a provided allowlist."
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sExternalIPs
+      validation:
+        # Schema for the `parameters` field
+        openAPIV3Schema:
+          properties:
+            allowedIPs:
+              type: array
+              items:
+                type: string
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8sexternalips
+
+      violation[{"msg": msg}] {
+        input.review.kind.kind == "Service"
+        input.review.kind.group == ""
+        allowedIPs := {ip | ip := input.parameters.allowedIPs[_]}
+        externalIPs := {ip | ip := input.review.object.spec.externalIPs[_]}
+        forbiddenIPs := externalIPs - allowedIPs
+        count(forbiddenIPs) > 0
+        msg := sprintf("service has forbidden external IPs: %v", [forbiddenIPs])
+      }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sHttpsOnly
+metadata:
+  name: ingress-https-only
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  match:
+    kinds:
+    - apiGroups: ["extensions", "networking.k8s.io"]
+      kinds: ["Ingress"]
+---
+apiVersion: config.gatekeeper.sh/v1alpha1
+kind: Config
+metadata:
+  name: config
+  namespace: "gatekeeper-system"
+spec:
+  sync:
+    syncOnly:
+    - group: "extensions"
+      version: "v1beta1"
+      kind: "Ingress"
+    - group: "networking.k8s.io"
+      version: "v1beta1"
+      kind: "Ingress"
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8shttpsonly
+  annotations:
+    description: Requires Ingress resources to be HTTPS only; TLS configuration should
+      be set and `kubernetes.io/ingress.allow-http` annotation equals false.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sHttpsOnly
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8shttpsonly
+
+      violation[{"msg": msg}] {
+        input.review.object.kind == "Ingress"
+        re_match("^(extensions|networking.k8s.io)/", input.review.object.apiVersion)
+        ingress := input.review.object
+        not https_complete(ingress)
+        msg := sprintf("Ingress should be https. tls configuration and allow-http=false annotation are required for %v", [ingress.metadata.name])
+      }
+
+      https_complete(ingress) = true {
+        ingress.spec["tls"]
+        count(ingress.spec.tls) > 0
+        ingress.metadata.annotations["kubernetes.io/ingress.allow-http"] == "false"
+      }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sImageDigests
+metadata:
+  name: container-image-must-have-digest
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  match:
+    kinds:
+    - apiGroups: [""]
+      kinds: ["Pod"]
+    namespaces:
+    - "default"
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8simagedigests
+  annotations:
+    description: Requires container images to contain a digest.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sImageDigests
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8simagedigests
+
+      violation[{"msg": msg}] {
+        container := input.review.object.spec.containers[_]
+        satisfied := [re_match("@[a-z0-9]+([+._-][a-z0-9]+)*:[a-zA-Z0-9=_-]+", container.image)]
+        not all(satisfied)
+        msg := sprintf("container <%v> uses an image without a digest <%v>", [container.name, container.image])
+      }
+
+      violation[{"msg": msg}] {
+        container := input.review.object.spec.initContainers[_]
+        satisfied := [re_match("@[a-z0-9]+([+._-][a-z0-9]+)*:[a-zA-Z0-9=_-]+", container.image)]
+        not all(satisfied)
+        msg := sprintf("initContainer <%v> uses an image without a digest <%v>", [container.name, container.image])
+      }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredLabels
+metadata:
+  name: all-must-have-owner
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  match:
+    kinds:
+    - apiGroups: [""]
+      kinds: ["Namespace"]
+  parameters:
+    message: "All namespaces must have an `owner` label that points to your company username"
+    labels:
+    - key: owner
+      allowedRegex: "^[a-zA-Z]+.agilebank.demo$"
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredlabels
+  annotations:
+    description: Requires all resources to contain a specified label with a value
+      matching a provided regular expression.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredLabels
+      validation:
+        # Schema for the `parameters` field
+        openAPIV3Schema:
+          properties:
+            message:
+              type: string
+            labels:
+              type: array
+              items:
+                type: object
+                properties:
+                  key:
+                    type: string
+                  allowedRegex:
+                    type: string
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8srequiredlabels
+
+      get_message(parameters, _default) = msg {
+        not parameters.message
+        msg := _default
+      }
+
+      get_message(parameters, _default) = msg {
+        msg := parameters.message
+      }
+
+      violation[{"msg": msg, "details": {"missing_labels": missing}}] {
+        provided := {label | input.review.object.metadata.labels[label]}
+        required := {label | label := input.parameters.labels[_].key}
+        missing := required - provided
+        count(missing) > 0
+        def_msg := sprintf("you must provide labels: %v", [missing])
+        msg := get_message(input.parameters, def_msg)
+      }
+
+      violation[{"msg": msg}] {
+        value := input.review.object.metadata.labels[key]
+        expected := input.parameters.labels[_]
+        expected.key == key
+        # do not match if allowedRegex is not defined, or is an empty string
+        expected.allowedRegex != ""
+        not re_match(expected.allowedRegex, value)
+        def_msg := sprintf("Label <%v: %v> does not satisfy allowed regex: %v", [key, value, expected.allowedRegex])
+        msg := get_message(input.parameters, def_msg)
+      }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredProbes
+metadata:
+  name: must-have-probes
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  match:
+    kinds:
+    - apiGroups: [""]
+      kinds: ["Pod"]
+  parameters:
+    probes: ["readinessProbe", "livenessProbe"]
+    probeTypes: ["tcpSocket", "httpGet", "exec"]
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredprobes
+  annotations:
+    description: Requires Pods to have readiness and/or liveness probes.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredProbes
+      validation:
+        openAPIV3Schema:
+          properties:
+            probes:
+              type: array
+              items:
+                type: string
+            probeTypes:
+              type: array
+              items:
+                type: string
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8srequiredprobes
+
+      probe_type_set = probe_types {
+        probe_types := {type | type := input.parameters.probeTypes[_]}
+      }
+
+      violation[{"msg": msg}] {
+        container := input.review.object.spec.containers[_]
+        probe := input.parameters.probes[_]
+        probe_is_missing(container, probe)
+        msg := get_violation_message(container, input.review, probe)
+      }
+
+      probe_is_missing(ctr, probe) = true {
+        not ctr[probe]
+      }
+
+      probe_is_missing(ctr, probe) = true {
+        probe_field_empty(ctr, probe)
+      }
+
+      probe_field_empty(ctr, probe) = true {
+        probe_fields := {field | ctr[probe][field]}
+        diff_fields := probe_type_set - probe_fields
+        count(diff_fields) == count(probe_type_set)
+      }
+
+      get_violation_message(container, review, probe) = msg {
+        msg := sprintf("Container <%v> in your <%v> <%v> has no <%v>", [container.name, review.kind.kind, review.object.metadata.name, probe])
+      }
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sUniqueIngressHost
+metadata:
+  name: unique-ingress-host
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  match:
+    kinds:
+    - apiGroups: ["extensions", "networking.k8s.io"]
+      kinds: ["Ingress"]
+---
+apiVersion: config.gatekeeper.sh/v1alpha1
+kind: Config
+metadata:
+  name: config
+  namespace: "gatekeeper-system"
+spec:
+  sync:
+    syncOnly:
+    - group: "extensions"
+      version: "v1beta1"
+      kind: "Ingress"
+    - group: "networking.k8s.io"
+      version: "v1beta1"
+      kind: "Ingress"
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8suniqueingresshost
+  annotations:
+    description: Requires all Ingress hosts to be unique.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sUniqueIngressHost
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8suniqueingresshost
+
+      identical(obj, review) {
+        obj.metadata.namespace == review.object.metadata.namespace
+        obj.metadata.name == review.object.metadata.name
+      }
+
+      violation[{"msg": msg}] {
+        input.review.kind.kind == "Ingress"
+        re_match("^(extensions|networking.k8s.io)$", input.review.kind.group)
+        host := input.review.object.spec.rules[_].host
+        other := data.inventory.namespace[ns][otherapiversion]["Ingress"][name]
+        re_match("^(extensions|networking.k8s.io)/.+$", otherapiversion)
+        other.spec.rules[_].host == host
+        not identical(other, input.review)
+        msg := sprintf("ingress host conflicts with an existing ingress <%v>", [host])
+      }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sUniqueServiceSelector
+metadata:
+  name: unique-service-selector
+  labels:
+    owner: admin.agilebank.demo
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8suniqueserviceselector
+  annotations:
+    description: Requires Services to have unique selectors within a namespace.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sUniqueServiceSelector
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8suniqueserviceselector
+
+      make_apiversion(kind) = apiVersion {
+        g := kind.group
+        v := kind.version
+        g != ""
+        apiVersion = sprintf("%v/%v", [g, v])
+      }
+
+      make_apiversion(kind) = apiVersion {
+        kind.group == ""
+        apiVersion = kind.version
+      }
+
+      identical(obj, review) {
+        obj.metadata.namespace == review.namespace
+        obj.metadata.name == review.name
+        obj.kind == review.kind.kind
+        obj.apiVersion == make_apiversion(review.kind)
+      }
+
+      flatten_selector(obj) = flattened {
+        selectors := [s | s = concat(":", [key, val]); val = obj.spec.selector[key]]
+        flattened := concat(",", sort(selectors))
+      }
+
+      violation[{"msg": msg}] {
+        input.review.kind.kind == "Service"
+        input.review.kind.version == "v1"
+        input.review.kind.group == ""
+        input_selector := flatten_selector(input.review.object)
+        other := data.inventory.namespace[namespace][_][_][name]
+        not identical(other, input.review)
+        other_selector := flatten_selector(other)
+        input_selector == other_selector
+        msg := sprintf("same selector as service <%v> in namespace <%v>", [name, namespace])
+      }
