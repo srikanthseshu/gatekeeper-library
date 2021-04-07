@@ -14,3 +14,4 @@ spec:
   parameters:
     repos:
       - "docker.io"
+        "gcr.io"
