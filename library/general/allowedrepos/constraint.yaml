@@ -13,5 +13,4 @@ spec:
       - "default"
   parameters:
     repos:
-      - "docker.io"
-        "gcr.io"
+      - "docker.io"     
